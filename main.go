@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jasonwashburn/chirpy/internal/auth"
 	"github.com/jasonwashburn/chirpy/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -39,6 +40,12 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
+func sendServerError(w http.ResponseWriter, message string) {
+	log.Printf("Error: %s", message)
+	w.WriteHeader(http.StatusInternalServerError)
+	json.NewEncoder(w).Encode(errorResponse{Error: message})
+}
+
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
@@ -59,6 +66,7 @@ func main() {
 	mux.HandleFunc("POST /api/users", handlerCreateUser)
 	mux.HandleFunc("GET /api/chirps", handlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirp_id}", handlerGetChirpByID)
+	mux.HandleFunc("POST /api/login", handlerLogin)
 	srv := http.Server{
 		Handler: mux,
 		Addr:    port,
@@ -95,8 +103,7 @@ func handlerReset(w http.ResponseWriter, r *http.Request) {
 	err := cfg.dbQueries.ResetUsers(r.Context())
 	if err != nil {
 		log.Printf("Error resetting users: %v\n", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
+		sendServerError(w, "Something went wrong")
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -119,6 +126,22 @@ func chirpResponseFromDBChirp(chirp database.Chirp) chirpResponseFormat {
 		UpdatedAt: chirp.UpdatedAt,
 		Body:      chirp.Body,
 		UserID:    chirp.UserID.String(),
+	}
+}
+
+type userResponseFormat struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+func userResponseFromDBUser(user database.User) userResponseFormat {
+	return userResponseFormat{
+		ID:        user.ID.String(),
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
 	}
 }
 
@@ -177,9 +200,7 @@ func handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
 	}
 	chirp, err := cfg.dbQueries.GetChirpByID(r.Context(), chirpID)
 	if err != nil {
-		log.Printf("Error getting chirp: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
+		sendServerError(w, "Something went wrong")
 		return
 	}
 
@@ -190,9 +211,7 @@ func handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
 func handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 	chirps, err := cfg.dbQueries.GetChirps(r.Context())
 	if err != nil {
-		log.Printf("Error getting chirps: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
+		sendServerError(w, "Something went wrong")
 		return
 	}
 	responseChirps := []chirpResponseFormat{}
@@ -205,41 +224,64 @@ func handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 
 func handlerCreateUser(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		log.Printf("Error decoding parameters: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
+		sendServerError(w, "Something went wrong")
 		return
 	}
 
-	user, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
+	hashedPassword, err := auth.HashPassword(params.Password)
 	if err != nil {
-		log.Printf("Error creating user: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
+		sendServerError(w, "Something went wrong")
 		return
 	}
-
-	type userResponseFormat struct {
-		ID        string    `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
+	user, err := cfg.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	})
+	if err != nil {
+		sendServerError(w, "Something went wrong")
+		return
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(userResponseFormat{
-		ID:        user.ID.String(),
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
-	})
+	json.NewEncoder(w).Encode(userResponseFromDBUser(user))
+}
+
+func handlerLogin(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		sendServerError(w, "Something went wrong")
+		return
+	}
+
+	user, err := cfg.dbQueries.GetUserByEmail(r.Context(), params.Email)
+	if err != nil {
+		sendServerError(w, "Something went wrong")
+		return
+	}
+
+	if !auth.CheckPasswordHash(params.Password, user.HashedPassword) {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid email or password"})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(userResponseFromDBUser(user))
 }
 
 func replaceBadWords(body string) string {
