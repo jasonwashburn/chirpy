@@ -57,7 +57,7 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", handlerReset)
 	mux.HandleFunc("POST /api/chirps", handlerCreateChirp)
 	mux.HandleFunc("POST /api/users", handlerCreateUser)
-
+	mux.HandleFunc("GET /api/chirps", handlerGetChirps)
 	srv := http.Server{
 		Handler: mux,
 		Addr:    port,
@@ -103,6 +103,14 @@ func handlerReset(w http.ResponseWriter, r *http.Request) {
 	log.Println("Users reset")
 }
 
+type chirpResponseFormat struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    string    `json:"user_id"`
+}
+
 func handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Body   string `json:"body"`
@@ -145,19 +153,35 @@ func handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(struct {
-		ID        string    `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Body      string    `json:"body"`
-		UserID    string    `json:"user_id"`
-	}{
+	json.NewEncoder(w).Encode(chirpResponseFormat{
 		ID:        chirp.ID.String(),
 		CreatedAt: chirp.CreatedAt,
 		UpdatedAt: chirp.UpdatedAt,
 		Body:      chirp.Body,
 		UserID:    chirp.UserID.String(),
 	})
+}
+
+func handlerGetChirps(w http.ResponseWriter, r *http.Request) {
+	chirps, err := cfg.dbQueries.GetChirps(r.Context())
+	if err != nil {
+		log.Printf("Error getting chirps: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
+		return
+	}
+	responseChirps := []chirpResponseFormat{}
+	for _, chirp := range chirps {
+		responseChirps = append(responseChirps, chirpResponseFormat{
+			ID:        chirp.ID.String(),
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			UserID:    chirp.UserID.String(),
+		})
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(responseChirps)
 }
 
 func handlerCreateUser(w http.ResponseWriter, r *http.Request) {
