@@ -112,6 +112,16 @@ type chirpResponseFormat struct {
 	UserID    string    `json:"user_id"`
 }
 
+func chirpResponseFromDBChirp(chirp database.Chirp) chirpResponseFormat {
+	return chirpResponseFormat{
+		ID:        chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID.String(),
+	}
+}
+
 func handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Body   string `json:"body"`
@@ -154,13 +164,7 @@ func handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(chirpResponseFormat{
-		ID:        chirp.ID.String(),
-		CreatedAt: chirp.CreatedAt,
-		UpdatedAt: chirp.UpdatedAt,
-		Body:      chirp.Body,
-		UserID:    chirp.UserID.String(),
-	})
+	json.NewEncoder(w).Encode(chirpResponseFromDBChirp(chirp))
 }
 
 func handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
@@ -180,13 +184,7 @@ func handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(chirpResponseFormat{
-		ID:        chirp.ID.String(),
-		CreatedAt: chirp.CreatedAt,
-		UpdatedAt: chirp.UpdatedAt,
-		Body:      chirp.Body,
-		UserID:    chirp.UserID.String(),
-	})
+	json.NewEncoder(w).Encode(chirpResponseFromDBChirp(chirp))
 }
 
 func handlerGetChirps(w http.ResponseWriter, r *http.Request) {
@@ -199,13 +197,7 @@ func handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 	}
 	responseChirps := []chirpResponseFormat{}
 	for _, chirp := range chirps {
-		responseChirps = append(responseChirps, chirpResponseFormat{
-			ID:        chirp.ID.String(),
-			CreatedAt: chirp.CreatedAt,
-			UpdatedAt: chirp.UpdatedAt,
-			Body:      chirp.Body,
-			UserID:    chirp.UserID.String(),
-		})
+		responseChirps = append(responseChirps, chirpResponseFromDBChirp(chirp))
 	}
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(responseChirps)
