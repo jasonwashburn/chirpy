@@ -58,6 +58,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", handlerCreateChirp)
 	mux.HandleFunc("POST /api/users", handlerCreateUser)
 	mux.HandleFunc("GET /api/chirps", handlerGetChirps)
+	mux.HandleFunc("GET /api/chirps/{chirp_id}", handlerGetChirpByID)
 	srv := http.Server{
 		Handler: mux,
 		Addr:    port,
@@ -153,6 +154,32 @@ func handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(chirpResponseFormat{
+		ID:        chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID.String(),
+	})
+}
+
+func handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("chirp_id")
+	chirpID, err := uuid.Parse(id)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid chirp ID"})
+		return
+	}
+	chirp, err := cfg.dbQueries.GetChirpByID(r.Context(), chirpID)
+	if err != nil {
+		log.Printf("Error getting chirp: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(chirpResponseFormat{
 		ID:        chirp.ID.String(),
 		CreatedAt: chirp.CreatedAt,
