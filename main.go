@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -249,6 +250,15 @@ func handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
 
 func handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 	queryParams := r.URL.Query()
+	sortParam := queryParams.Get("sort")
+	if sortParam == "" {
+		sortParam = "asc"
+	} else if sortParam != "asc" && sortParam != "desc" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid sort parameter"})
+		return
+	}
+
 	authorID := queryParams.Get("author_id")
 	var chirps []database.Chirp
 	var err error
@@ -275,6 +285,11 @@ func handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 	responseChirps := []chirpResponseFormat{}
 	for _, chirp := range chirps {
 		responseChirps = append(responseChirps, chirpResponseFromDBChirp(chirp))
+	}
+	if sortParam == "desc" {
+		sort.Slice(responseChirps, func(i, j int) bool {
+			return responseChirps[i].CreatedAt.After(responseChirps[j].CreatedAt)
+		})
 	}
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(responseChirps)
