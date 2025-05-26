@@ -24,6 +24,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	tokenSecret    string
+	polkaKey       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -51,6 +52,8 @@ func main() {
 	godotenv.Load()
 	tokenSecret := os.Getenv("TOKEN_SECRET")
 	cfg.tokenSecret = tokenSecret
+	polkaKey := os.Getenv("POLKA_KEY")
+	cfg.polkaKey = polkaKey
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -538,6 +541,20 @@ func handlerDeleteChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlerPolkaWebhook(w http.ResponseWriter, r *http.Request) {
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		log.Printf("Error getting API key: %v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
+	if apiKey != cfg.polkaKey {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
 	type parameters struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -547,8 +564,8 @@ func handlerPolkaWebhook(w http.ResponseWriter, r *http.Request) {
 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
-	if err != nil {
+
+	if err := decoder.Decode(&params); err != nil {
 		log.Printf("Error decoding parameters: %v", err)
 		sendServerError(w, "Something went wrong")
 		return
