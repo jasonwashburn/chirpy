@@ -23,6 +23,7 @@ const port string = ":8080"
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	tokenSecret    string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -48,6 +49,8 @@ func sendServerError(w http.ResponseWriter, message string) {
 
 func main() {
 	godotenv.Load()
+	tokenSecret := os.Getenv("TOKEN_SECRET")
+	cfg.tokenSecret = tokenSecret
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -129,15 +132,15 @@ func chirpResponseFromDBChirp(chirp database.Chirp) chirpResponseFormat {
 	}
 }
 
-type userResponseFormat struct {
+type UserResponseFormat struct {
 	ID        string    `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
 }
 
-func userResponseFromDBUser(user database.User) userResponseFormat {
-	return userResponseFormat{
+func userResponseFromDBUser(user database.User) UserResponseFormat {
+	return UserResponseFormat{
 		ID:        user.ID.String(),
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
@@ -147,24 +150,48 @@ func userResponseFromDBUser(user database.User) userResponseFormat {
 
 func handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Body   string `json:"body"`
-		UserID string `json:"user_id"`
+		Body string `json:"body"`
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting bearer token: %v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.tokenSecret)
+	if err != nil {
+		log.Printf("Error validating JWT: %v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
+	if userID == uuid.Nil {
+		log.Printf("Invalid user ID: %v", userID)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
+	// Validate user hasn't been removed since JWT was issued
+	_, err = cfg.dbQueries.GetUserByID(r.Context(), userID)
+	if err != nil {
+		log.Printf("Error getting user by ID: %v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
-	if err != nil {
+
+	if err = decoder.Decode(&params); err != nil {
 		log.Printf("Error decoding parameters: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
-		return
-	}
-
-	userID, err := uuid.Parse(params.UserID)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid user ID"})
 		return
 	}
 
@@ -256,20 +283,23 @@ func handlerCreateUser(w http.ResponseWriter, r *http.Request) {
 
 func handlerLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds int    `json:"expires_in_seconds"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
+		log.Printf("Error decoding parameters: %v", err)
 		sendServerError(w, "Something went wrong")
 		return
 	}
 
 	user, err := cfg.dbQueries.GetUserByEmail(r.Context(), params.Email)
 	if err != nil {
+		log.Printf("Error getting user by email: %v", err)
 		sendServerError(w, "Something went wrong")
 		return
 	}
@@ -280,8 +310,26 @@ func handlerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if params.ExpiresInSeconds == 0 || params.ExpiresInSeconds > 3600 {
+		params.ExpiresInSeconds = 3600
+	}
+
+	expiresIn := time.Duration(params.ExpiresInSeconds) * time.Second
+	token, err := auth.MakeJWT(user.ID, cfg.tokenSecret, expiresIn)
+	if err != nil {
+		log.Printf("Error making JWT: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(userResponseFromDBUser(user))
+	json.NewEncoder(w).Encode(struct {
+		UserResponseFormat
+		Token string `json:"token"`
+	}{
+		UserResponseFormat: userResponseFromDBUser(user),
+		Token:              token,
+	})
 }
 
 func replaceBadWords(body string) string {

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -138,4 +139,13 @@ func TestValidateJWT_InvalidClaims(t *testing.T) {
 	_, err = ValidateJWT(signedToken, tokenSecret)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid user ID")
+}
+
+func TestGetBearerToken(t *testing.T) {
+	request := httptest.NewRequest("GET", "/", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+
+	token, err := GetBearerToken(request.Header)
+	assert.NoError(t, err)
+	assert.Equal(t, "test-token", token)
 }
