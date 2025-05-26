@@ -67,9 +67,13 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", handlerReset)
 	mux.HandleFunc("POST /api/chirps", handlerCreateChirp)
 	mux.HandleFunc("POST /api/users", handlerCreateUser)
+	mux.HandleFunc("PUT /api/users", handlerUpdateUser)
 	mux.HandleFunc("GET /api/chirps", handlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirp_id}", handlerGetChirpByID)
+	mux.HandleFunc("DELETE /api/chirps/{chirp_id}", handlerDeleteChirp)
 	mux.HandleFunc("POST /api/login", handlerLogin)
+	mux.HandleFunc("POST /api/refresh", handlerRefresh)
+	mux.HandleFunc("POST /api/revoke", handlerRevokeRefreshToken)
 	srv := http.Server{
 		Handler: mux,
 		Addr:    port,
@@ -227,7 +231,9 @@ func handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
 	}
 	chirp, err := cfg.dbQueries.GetChirpByID(r.Context(), chirpID)
 	if err != nil {
-		sendServerError(w, "Something went wrong")
+		log.Printf("Error getting chirp by ID: %v", err)
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Chirp not found"})
 		return
 	}
 
@@ -281,11 +287,80 @@ func handlerCreateUser(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(userResponseFromDBUser(user))
 }
 
+func handlerUpdateUser(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting bearer token: %v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.tokenSecret)
+	if err != nil {
+		log.Printf("Error validating JWT: %v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+	type parameters struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		log.Printf("Error decoding parameters: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
+	}
+
+	if params.Email == "" || params.Password == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Email and password are required"})
+		return
+	}
+
+	if userID == uuid.Nil {
+		log.Printf("Invalid user ID: %v", userID)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+	user, err := cfg.dbQueries.GetUserByID(r.Context(), userID)
+	if err != nil {
+		log.Printf("Error getting user by ID: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
+	}
+	newHashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		log.Printf("Error hashing password: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
+	}
+
+	user, err = cfg.dbQueries.UpdateUser(r.Context(), database.UpdateUserParams{
+		ID:             userID,
+		Email:          params.Email,
+		HashedPassword: newHashedPassword,
+	})
+	if err != nil {
+		log.Printf("Error updating user: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(userResponseFromDBUser(user))
+}
+
 func handlerLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email            string `json:"email"`
-		Password         string `json:"password"`
-		ExpiresInSeconds int    `json:"expires_in_seconds"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -310,12 +385,64 @@ func handlerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if params.ExpiresInSeconds == 0 || params.ExpiresInSeconds > 3600 {
-		params.ExpiresInSeconds = 3600
+	expiresIn := 3600 * time.Second
+	token, err := auth.MakeJWT(user.ID, cfg.tokenSecret, expiresIn)
+	if err != nil {
+		log.Printf("Error making JWT: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
 	}
 
-	expiresIn := time.Duration(params.ExpiresInSeconds) * time.Second
-	token, err := auth.MakeJWT(user.ID, cfg.tokenSecret, expiresIn)
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		log.Printf("Error making refresh token: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
+	}
+	_, err = cfg.dbQueries.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:     refreshToken,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().Add(60 * 24 * time.Hour),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	})
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(struct {
+		UserResponseFormat
+		Token        string `json:"token"`
+		RefreshToken string `json:"refresh_token"`
+	}{
+		UserResponseFormat: userResponseFromDBUser(user),
+		Token:              token,
+		RefreshToken:       refreshToken,
+	})
+}
+
+func handlerRefresh(w http.ResponseWriter, r *http.Request) {
+	refreshTokenFromHeader, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting bearer token: %v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+	refreshToken, err := cfg.dbQueries.GetRefreshTokenByToken(r.Context(), refreshTokenFromHeader)
+	if err != nil {
+		log.Printf("Error getting refresh token by token: %v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
+	if refreshToken.RevokedAt.Valid {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
+	expiresIn := 3600 * time.Second
+	token, err := auth.MakeJWT(refreshToken.UserID, cfg.tokenSecret, expiresIn)
 	if err != nil {
 		log.Printf("Error making JWT: %v", err)
 		sendServerError(w, "Something went wrong")
@@ -324,12 +451,87 @@ func handlerLogin(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(struct {
-		UserResponseFormat
 		Token string `json:"token"`
 	}{
-		UserResponseFormat: userResponseFromDBUser(user),
-		Token:              token,
+		Token: token,
 	})
+}
+
+func handlerRevokeRefreshToken(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting bearer token: %v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
+	err = cfg.dbQueries.RevokeRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		log.Printf("Error revoking refresh token: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+	json.NewEncoder(w).Encode(errorResponse{Error: "Refresh token revoked"})
+}
+
+func handlerDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error getting bearer token: %v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.tokenSecret)
+	if err != nil {
+		log.Printf("Error validating JWT: %v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
+	if userID == uuid.Nil {
+		log.Printf("Invalid user ID: %v", userID)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Unauthorized"})
+		return
+	}
+
+	chirpID := r.PathValue("chirp_id")
+	chirpUUID, err := uuid.Parse(chirpID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid chirp ID"})
+		return
+	}
+
+	chirp, err := cfg.dbQueries.GetChirpByID(r.Context(), chirpUUID)
+	if err != nil {
+		log.Printf("Error getting chirp by ID: %v", err)
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Chirp not found"})
+		return
+	}
+
+	if chirp.UserID != userID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Forbidden"})
+		return
+	}
+
+	err = cfg.dbQueries.DeleteChirp(r.Context(), chirpUUID)
+	if err != nil {
+		log.Printf("Error deleting chirp: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+	json.NewEncoder(w).Encode(errorResponse{Error: "Chirp deleted"})
 }
 
 func replaceBadWords(body string) string {
