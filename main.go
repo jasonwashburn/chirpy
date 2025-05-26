@@ -74,6 +74,7 @@ func main() {
 	mux.HandleFunc("POST /api/login", handlerLogin)
 	mux.HandleFunc("POST /api/refresh", handlerRefresh)
 	mux.HandleFunc("POST /api/revoke", handlerRevokeRefreshToken)
+	mux.HandleFunc("POST /api/polka/webhooks", handlerPolkaWebhook)
 	srv := http.Server{
 		Handler: mux,
 		Addr:    port,
@@ -137,18 +138,20 @@ func chirpResponseFromDBChirp(chirp database.Chirp) chirpResponseFormat {
 }
 
 type UserResponseFormat struct {
-	ID        string    `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID          string    `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 func userResponseFromDBUser(user database.User) UserResponseFormat {
 	return UserResponseFormat{
-		ID:        user.ID.String(),
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+		ID:          user.ID.String(),
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 }
 
@@ -532,6 +535,53 @@ func handlerDeleteChirp(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 	json.NewEncoder(w).Encode(errorResponse{Error: "Chirp deleted"})
+}
+
+func handlerPolkaWebhook(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID string `json:"user_id"`
+		} `json:"data"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		log.Printf("Error decoding parameters: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	userUUID, err := uuid.Parse(params.Data.UserID)
+	if err != nil {
+		log.Printf("Error parsing user ID: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
+	}
+
+	_, err = cfg.dbQueries.GetUserByID(r.Context(), userUUID)
+	if err != nil {
+		log.Printf("Error getting user by ID: %v", err)
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(errorResponse{Error: "User not found"})
+		return
+	}
+
+	_, err = cfg.dbQueries.UpgradeUserToChirpyRed(r.Context(), userUUID)
+	if err != nil {
+		log.Printf("Error upgrading user to Chirpy Red: %v", err)
+		sendServerError(w, "Something went wrong")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func replaceBadWords(body string) string {
