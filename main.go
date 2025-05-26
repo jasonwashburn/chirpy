@@ -248,11 +248,30 @@ func handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlerGetChirps(w http.ResponseWriter, r *http.Request) {
-	chirps, err := cfg.dbQueries.GetChirps(r.Context())
-	if err != nil {
-		sendServerError(w, "Something went wrong")
-		return
+	queryParams := r.URL.Query()
+	authorID := queryParams.Get("author_id")
+	var chirps []database.Chirp
+	var err error
+	if authorID != "" {
+		authorUUID, err := uuid.Parse(authorID)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(errorResponse{Error: "Invalid user ID"})
+			return
+		}
+		chirps, err = cfg.dbQueries.GetChirpsByUserID(r.Context(), authorUUID)
+		if err != nil {
+			sendServerError(w, "Something went wrong")
+			return
+		}
+	} else {
+		chirps, err = cfg.dbQueries.GetChirps(r.Context())
+		if err != nil {
+			sendServerError(w, "Something went wrong")
+			return
+		}
 	}
+
 	responseChirps := []chirpResponseFormat{}
 	for _, chirp := range chirps {
 		responseChirps = append(responseChirps, chirpResponseFromDBChirp(chirp))
